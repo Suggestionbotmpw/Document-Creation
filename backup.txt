@@ -1,0 +1,1214 @@
+import torch
+import json
+import re
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
+from config import BASE_MODEL
+
+# ======================================================
+# App
+# ======================================================
+app = FastAPI(title="AI Recommendation Generator")
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ======================================================
+# Load tokenizer (ONCE)
+# ======================================================
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+tokenizer.pad_token = tokenizer.eos_token
+
+# ======================================================
+# Load base model + LoRA (ONCE)
+# ======================================================
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True
+)
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    quantization_config=bnb_config,
+    device_map="auto"
+)
+
+model = PeftModel.from_pretrained(base_model, "trained-lora")
+model.eval()
+
+# ======================================================
+# Request Schema
+# ======================================================
+class GenerateRequest(BaseModel):
+    Heading: str
+    CustomerNeed: str
+    Impact: str | None = ""
+    ServicePerformed: str
+    ServiceSummaryTitle: str
+    ServiceSummaryContent: str
+    Language: str = "en-US"
+
+    NumRecommendations: int
+    NumSupportingReasons: int
+    NumEvidence: int
+
+
+# ======================================================
+# Helpers
+# ======================================================
+def extract_json(text):
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group())
+    except json.JSONDecodeError:
+        return None
+
+
+def validate_output(data, n_rec, n_reason, n_ev):
+    issues = []
+
+    if data is None:
+        return 0, ["Invalid JSON"]
+
+    try:
+        solutions = data["Solutions"]
+        if len(solutions) != n_rec:
+            issues.append("Recommendation count mismatch")
+
+        for sol in solutions:
+            reasons = sol.get("SupportingReasons", [])
+            if len(reasons) != n_reason:
+                issues.append("SupportingReason count mismatch")
+
+            for r in reasons:
+                ev = r.get("Evidence", [])
+                if len(ev) != n_ev:
+                    issues.append("Evidence count mismatch")
+
+    except Exception:
+        issues.append("Invalid structure")
+
+    score = max(100 - (len(issues) * 15), 0)
+    return score, list(set(issues))
+
+
+# ======================================================
+# API Endpoint
+# ======================================================
+@app.post("/generate")
+def generate_document(req: GenerateRequest):
+    prompt = f"""### Instruction:
+Generate a professional technical recommendation document.
+
+### Constraints (MANDATORY):
+You MUST strictly follow these numeric requirements.
+Violating them is incorrect output.
+
+- NumRecommendations: {req.NumRecommendations}
+- NumSupportingReasons: {req.NumSupportingReasons}
+- NumEvidence: {req.NumEvidence}
+
+### Input:
+{json.dumps(req.dict(exclude={
+    "NumRecommendations",
+    "NumSupportingReasons",
+    "NumEvidence"
+}), indent=2)}
+
+### Output (JSON ONLY — no extra text):
+"""
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=900,
+            temperature=0.0,
+            do_sample=False,
+            repetition_penalty=1.15,
+            eos_token_id=tokenizer.eos_token_id
+        )
+
+    decoded = tokenizer.decode(output[0], skip_special_tokens=True)
+    result_json = extract_json(decoded)
+
+    accuracy, issues = validate_output(
+        result_json,
+        req.NumRecommendations,
+        req.NumSupportingReasons,
+        req.NumEvidence
+    )
+
+    return {
+        "generated_text": decoded,
+        "parsed_json": result_json,
+        "accuracy": accuracy,
+        "issues": issues
+    }
+
+
+
+
+"Solutions": [  
+    {     
+        "Recommendation": "Implement a Mobil Serv Planned Engineering Service (PES) program for periodic inspections and recommendations",
+        "Result": "to improve filtration practices and prompt identification of abnormal oil analysis results",
+        "SupportingReasons": [{ 
+            "SupportingReason": "Improve Oil Cleanliness through Filtration Practices",        
+            "Evidence": [          
+                {        
+                    "EvidenceTitle": "Decoded HTML Revisiting our objective to reduce equipment failures due to lubricant contamination",
+                    "EvidenceContent": "The current contamination levels are contributing to shortened oil lifeterms and increasing maintenance costs. Improving filtration practices will help reduce contaminants entering the oil reservoir and therefore keep oil cleaner longer; reducing both oil consumption and downtime."
+                }
+                ] },        
+            {
+            "SupportingReason": "Increase Oil Monitoring Frequency and Responsiveness",
+            "Evidence": [
+                {
+                    "EvidenceTitle": "Decoded HTML Revisiting our objective to reduce equipment failures due to lubricant contamination",             
+                    "EvidenceContent": "The current contamination levels are contributing to shortened oil lifeterms and increasing maintenance costs. Improving filtration practices will help reduce contaminants entering the oil reservoir and therefore keep oil cleaner longer; reducing both oil consumption and downtime."          
+                }         
+                ]       
+                }    ]   },
+                {      
+                    "Recommendation": "Implement a Mobil Serv Planned Engineering Service (PES) program for periodic inspections and recommendations", 
+                    "Result": "to improve filtration practices and prompt identification of abnormal oil analysis results",    
+                    "SupportingReasons": [   
+                        {          "SupportingReason": "Improve Oil Cleanliness through Filtration"}
+                
+                ]
+                }
+]
+
+
+-------------------------------Working Well with 85% accuracy-----------------------------------------------------------------
+import torch
+import json
+import re
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from difflib import SequenceMatcher
+from config import BASE_MODEL
+
+
+# ======================================================
+# FastAPI App
+# ======================================================
+app = FastAPI(
+    title="Interactive Recommendation Builder",
+    version="1.5"
+)
+
+
+# ======================================================
+# Load BASE MODEL ONLY
+# ======================================================
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+tokenizer.pad_token = tokenizer.eos_token
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    quantization_config=bnb_config,
+    device_map="auto"
+)
+model.eval()
+
+
+# ======================================================
+# INPUT SCHEMA
+# ======================================================
+class SupportingReasonInput(BaseModel):
+    evidenceCount: int
+
+
+class RecommendationInput(BaseModel):
+    supportingReasons: List[SupportingReasonInput]
+
+
+class GenerateRequest(BaseModel):
+    context: dict
+    recommendations: List[RecommendationInput]
+    language: str = "en-US"
+
+
+# ======================================================
+# SANITIZER
+# ======================================================
+def sanitize(text: str) -> str:
+    text = re.sub(
+        r"^(recommendation|technical reason|supporting reason|justification|evidence paragraph|evidence statement)\s*:\s*",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE
+    )
+    text = re.sub(r"[\{\}\[\]]", "", text)
+    text = re.sub(r"\b\d+\.\s*", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+# ======================================================
+# SIMILARITY CHECK (CORE OF DE-DUP)
+# ======================================================
+def is_duplicate(text: str, previous: List[str], threshold: float = 0.85) -> bool:
+    for prev in previous:
+        ratio = SequenceMatcher(None, text.lower(), prev.lower()).ratio()
+        if ratio >= threshold:
+            return True
+    return False
+
+
+# ======================================================
+# LLM CALL (TEXT ONLY)
+# ======================================================
+def generate_text(prompt: str, max_new_tokens: int = 180) -> str:
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    input_len = inputs["input_ids"].shape[1]
+
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            repetition_penalty=1.25,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    text = tokenizer.decode(output[0][input_len:], skip_special_tokens=True)
+    return sanitize(text)
+
+
+# ======================================================
+# SAFE GENERATION (NO DUPLICATES)
+# ======================================================
+def generate_unique(prompt: str, previous: List[str], retries: int = 4) -> str:
+    for _ in range(retries):
+        text = generate_text(prompt)
+        if text and not is_duplicate(text, previous):
+            return text
+    # fallback: return best effort
+    return text
+
+
+# ======================================================
+# API ENDPOINT
+# ======================================================
+@app.post("/generate")
+def generate_document(req: GenerateRequest):
+
+    context_json = json.dumps(req.context, indent=2)
+    final_output = {"Solutions": []}
+
+    used_recommendations = []
+
+    for rec in req.recommendations:
+
+        # =========================
+        # Recommendation
+        # =========================
+        rec_prompt = f"""
+Write ONE professional technical recommendation sentence.
+
+Rules:
+- One sentence only
+- Do NOT repeat previous recommendations
+- Start directly with content
+- No labels or formatting
+- Language: {req.language}
+
+Previous Recommendations:
+{used_recommendations}
+
+Context:
+{context_json}
+"""
+        recommendation_text = generate_unique(rec_prompt, used_recommendations)
+        used_recommendations.append(recommendation_text)
+
+        solution = {
+            "Recommendation": recommendation_text,
+            "SupportingReasons": []
+        }
+
+        used_reasons = []
+
+        for sr in rec.supportingReasons:
+
+            # =========================
+            # Supporting Reason
+            # =========================
+            sr_prompt = f"""
+Write ONE concise technical justification sentence.
+
+Rules:
+- One sentence only
+- Do NOT repeat previous reasons
+- Focus on a DIFFERENT technical aspect
+- No labels
+- Language: {req.language}
+
+Previous Supporting Reasons:
+{used_reasons}
+
+Recommendation:
+{recommendation_text}
+
+Context:
+{context_json}
+"""
+            supporting_reason_text = generate_unique(sr_prompt, used_reasons)
+            used_reasons.append(supporting_reason_text)
+
+            used_evidence = []
+            evidence_list = []
+
+            for _ in range(sr.evidenceCount):
+
+                # =========================
+                # Evidence
+                # =========================
+                ev_prompt = f"""
+Write 2–3 factual technical sentences as evidence.
+
+Rules:
+- Do NOT repeat previous evidence
+- Use a DIFFERENT data point or observation
+- No labels or conclusions
+- Language: {req.language}
+
+Previous Evidence:
+{used_evidence}
+
+Supporting Reason:
+{supporting_reason_text}
+
+Context:
+{context_json}
+"""
+                evidence_text = generate_unique(ev_prompt, used_evidence, retries=5)
+                used_evidence.append(evidence_text)
+
+                evidence_list.append({
+                    "EvidenceTitle": "",
+                    "EvidenceContent": evidence_text
+                })
+
+            solution["SupportingReasons"].append({
+                "SupportingReason": supporting_reason_text,
+                "Evidence": evidence_list
+            })
+
+        final_output["Solutions"].append(solution)
+
+    return final_output
+
+
+
+
+
+
+
+
+
+
+
+
+===============================================================================================================================================================================================
+                                                           Fast API working fine with LORA+MISTRAL
+===============================================================================================================================================================================================
+
+
+import torch
+import json
+import re
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
+
+# ======================================================
+# CONFIG
+# ======================================================
+
+BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+LORA_PATH = "./trained-lora"
+
+# Token limits per task
+TOKENS_RECOMMENDATION = 60
+TOKENS_RESULT = 40
+TOKENS_REASON = 50
+TOKENS_EVIDENCE = 120
+
+TEMPERATURE = 0.7
+TOP_P = 0.9
+
+# ======================================================
+# FASTAPI APP
+# ======================================================
+
+app = FastAPI(title="AI Recommendation Generator", version="2.2")
+
+# ======================================================
+# LOAD TOKENIZER
+# ======================================================
+
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+tokenizer.pad_token = tokenizer.eos_token
+
+# ======================================================
+# LOAD MODEL (4-bit)
+# ======================================================
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True
+)
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    quantization_config=bnb_config,
+    device_map="auto"
+)
+
+model = PeftModel.from_pretrained(base_model, LORA_PATH)
+model.eval()
+
+# ======================================================
+# REQUEST SCHEMA
+# ======================================================
+
+class SupportingReasonInput(BaseModel):
+    evidenceCount: int
+
+class RecommendationInput(BaseModel):
+    supportingReasons: List[SupportingReasonInput]
+
+class GenerateRequest(BaseModel):
+    context: dict
+    recommendations: List[RecommendationInput]
+
+# ======================================================
+# SANITIZER (FINAL SAFETY NET)
+# ======================================================
+
+BAD_PATTERNS = [
+    r"\{.*?\}",
+    r"\[.*?\]",
+    r"json",
+    r"html",
+    r"decoded",
+    r"timestamp",
+    r"instanceid",
+    r"report",
+    r":"
+]
+
+def sanitize(text: str) -> str:
+    for p in BAD_PATTERNS:
+        text = re.sub(p, "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+# ======================================================
+# GENERATION CORE (FIXED)
+# ======================================================
+
+def generate(prompt: str, max_tokens: int) -> str:
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    input_len = inputs["input_ids"].shape[1]
+
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            do_sample=True,
+            repetition_penalty=1.1,
+            eos_token_id=tokenizer.eos_token_id
+        )
+
+    new_tokens = output[0][input_len:]
+    text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+    return sanitize(text)
+
+# ======================================================
+# PROMPTS (STRICT)
+# ======================================================
+
+def recommendation_prompt(ctx):
+    return f"""
+Write ONE professional technical recommendation.
+
+Rules:
+- One sentence
+- Plain technical language
+- No labels
+- No reports
+- No JSON
+- No copied content
+
+Context:
+{ctx.get("ServiceSummaryContent", "")}
+
+Answer:
+""".strip()
+
+def result_prompt(ctx, rec):
+    return f"""
+Write ONE concise technical result.
+
+Rules:
+- One sentence
+- Outcome focused
+- No labels
+- No report style
+
+Recommendation:
+{rec}
+
+Answer:
+""".strip()
+
+def supporting_reason_prompt(ctx, rec):
+    return f"""
+Write ONE technical supporting reason.
+
+Rules:
+- One sentence
+- Explain WHY
+- No labels
+- No reports
+
+Recommendation:
+{rec}
+
+Answer:
+""".strip()
+
+def evidence_prompt(ctx, reason):
+    return f"""
+Write factual technical evidence.
+
+Rules:
+- 2–3 sentences
+- Observations only
+- No conclusions
+- No reports
+- No copied content
+
+Supporting Reason:
+{reason}
+
+Answer:
+""".strip()
+
+# ======================================================
+# API ENDPOINT
+# ======================================================
+
+@app.post("/generate")
+def generate_document(req: GenerateRequest):
+
+    solutions = []
+
+    for rec in req.recommendations:
+
+        recommendation = generate(
+            recommendation_prompt(req.context),
+            TOKENS_RECOMMENDATION
+        )
+
+        result = generate(
+            result_prompt(req.context, recommendation),
+            TOKENS_RESULT
+        )
+
+        supporting_reasons = []
+
+        for sr in rec.supportingReasons:
+            sr_text = generate(
+                supporting_reason_prompt(req.context, recommendation),
+                TOKENS_REASON
+            )
+
+            evidence = []
+            for _ in range(sr.evidenceCount):
+                ev = generate(
+                    evidence_prompt(req.context, sr_text),
+                    TOKENS_EVIDENCE
+                )
+                evidence.append({
+                    "EvidenceTitle": "",
+                    "EvidenceContent": ev
+                })
+
+            supporting_reasons.append({
+                "SupportingReason": sr_text,
+                "Evidence": evidence
+            })
+
+        solutions.append({
+            "Recommendation": recommendation,
+            "Result": result,
+            "SupportingReasons": supporting_reasons
+        })
+
+    return {"Solutions": solutions}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===============================================================================================================================================================================================
+                                                           Fast API working fine with LORA+MISTRAL this code was showed with Rick
+===============================================================================================================================================================================================
+
+
+# import torch
+# import json
+# from fastapi import FastAPI
+# from pydantic import BaseModel
+# from typing import List
+# from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+# from peft import PeftModel
+
+# # ======================================================
+# # CONFIG
+# # ======================================================
+
+# BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+# LORA_PATH = "./trained-lora"
+
+# MAX_NEW_TOKENS = 300
+# TEMPERATURE = 0.7
+# TOP_P = 0.9
+
+# # ======================================================
+# # FASTAPI APP
+# # ======================================================
+
+# app = FastAPI(
+#     title="AI Recommendation Generator",
+#     version="2.1"
+# )
+
+# # ======================================================
+# # LOAD TOKENIZER
+# # ======================================================
+
+# tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+# tokenizer.pad_token = tokenizer.eos_token
+
+# # ======================================================
+# # LOAD BASE MODEL (4-bit)
+# # ======================================================
+
+# bnb_config = BitsAndBytesConfig(
+#     load_in_4bit=True,
+#     bnb_4bit_quant_type="nf4",
+#     bnb_4bit_compute_dtype=torch.float16,
+#     bnb_4bit_use_double_quant=True
+# )
+
+# base_model = AutoModelForCausalLM.from_pretrained(
+#     BASE_MODEL,
+#     quantization_config=bnb_config,
+#     device_map="auto"
+# )
+
+# # ======================================================
+# # ATTACH LoRA
+# # ======================================================
+
+# model = PeftModel.from_pretrained(base_model, LORA_PATH)
+# model.eval()
+
+# # ======================================================
+# # REQUEST SCHEMA
+# # ======================================================
+
+# class SupportingReasonInput(BaseModel):
+#     evidenceCount: int
+
+# class RecommendationInput(BaseModel):
+#     supportingReasons: List[SupportingReasonInput]
+
+# class GenerateRequest(BaseModel):
+#     context: dict
+#     recommendations: List[RecommendationInput]
+
+# # ======================================================
+# # GENERATION CORE
+# # ======================================================
+
+# def generate(prompt: str) -> str:
+#     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+#     with torch.no_grad():
+#         output = model.generate(
+#             **inputs,
+#             max_new_tokens=MAX_NEW_TOKENS,
+#             temperature=TEMPERATURE,
+#             top_p=TOP_P,
+#             do_sample=True,
+#             repetition_penalty=1.15,
+#             eos_token_id=tokenizer.eos_token_id
+#         )
+
+#     text = tokenizer.decode(output[0], skip_special_tokens=True)
+#     return text.replace(prompt, "").strip()
+
+# # ======================================================
+# # PROMPT BUILDERS (VERY IMPORTANT)
+# # ======================================================
+
+# def recommendation_prompt(context: dict) -> str:
+#     return f"""
+# Write ONE professional technical recommendation.
+
+# Rules:
+# - Short
+# - Clear
+# - No labels
+# - No numbers
+# - No reports
+# - No JSON
+
+# Context:
+# Heading: {context.get("Heading", "")}
+# Customer Need: {context.get("CustomerNeed", "")}
+# Service Summary: {context.get("ServiceSummaryContent", "")}
+
+# Answer:
+# """.strip()
+
+
+# def result_prompt(context: dict, recommendation: str) -> str:
+#     return f"""
+# Write ONE concise technical result of implementing the recommendation.
+
+# Rules:
+# - One sentence
+# - Quantifiable improvement if possible
+# - No labels
+# - No reports
+
+# Recommendation:
+# {recommendation}
+
+# Context:
+# {context.get("ServiceSummaryContent", "")}
+
+# Answer:
+# """.strip()
+
+
+# def supporting_reason_prompt(context: dict, recommendation: str) -> str:
+#     return f"""
+# Write ONE technical supporting reason explaining WHY the recommendation is needed.
+
+# Rules:
+# - One sentence
+# - Technical
+# - No labels
+# - No reports
+
+# Recommendation:
+# {recommendation}
+
+# Context:
+# {context.get("ServiceSummaryContent", "")}
+
+# Answer:
+# """.strip()
+
+
+# def evidence_prompt(context: dict, supporting_reason: str) -> str:
+#     return f"""
+# Write ONE factual technical evidence paragraph.
+
+# Rules:
+# - 2–3 sentences
+# - No labels
+# - No conclusions
+# - No reports
+# - No copied content
+
+# Supporting Reason:
+# {supporting_reason}
+
+# Context:
+# {context.get("ServiceSummaryContent", "")}
+
+# Answer:
+# """.strip()
+
+# # ======================================================
+# # API ENDPOINT
+# # ======================================================
+
+# @app.post("/generate")
+# def generate_document(req: GenerateRequest):
+
+#     solutions = []
+
+#     for rec in req.recommendations:
+
+#         # -----------------------------
+#         # Recommendation
+#         # -----------------------------
+#         recommendation = generate(recommendation_prompt(req.context))
+
+#         # -----------------------------
+#         # Result
+#         # -----------------------------
+#         result = generate(result_prompt(req.context, recommendation))
+
+#         supporting_reasons_output = []
+
+#         # -----------------------------
+#         # Supporting Reasons
+#         # -----------------------------
+#         for sr in rec.supportingReasons:
+
+#             sr_text = generate(
+#                 supporting_reason_prompt(req.context, recommendation)
+#             )
+
+#             evidence_list = []
+
+#             for _ in range(sr.evidenceCount):
+#                 ev_text = generate(
+#                     evidence_prompt(req.context, sr_text)
+#                 )
+
+#                 evidence_list.append({
+#                     "EvidenceTitle": "",
+#                     "EvidenceContent": ev_text
+#                 })
+
+#             supporting_reasons_output.append({
+#                 "SupportingReason": sr_text,
+#                 "Evidence": evidence_list
+#             })
+
+#         solutions.append({
+#             "Recommendation": recommendation,
+#             "Result": result,
+#             "SupportingReasons": supporting_reasons_output
+#         })
+
+#     return {
+#         "Solutions": solutions
+#     }
+
+
+
+
+
+
+
+
+
+
+
+
+import torch
+import json
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
+
+# ======================================================
+# CONFIG
+# ======================================================
+
+BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+LORA_PATH = "./trained-lora"
+
+MAX_NEW_TOKENS = 220
+TEMPERATURE = 0.6
+TOP_P = 0.9
+
+# ======================================================
+# FASTAPI APP
+# ======================================================
+
+app = FastAPI(
+    title="AI Recommendation Generator",
+    version="3.0"
+)
+
+# ======================================================
+# LOAD TOKENIZER
+# ======================================================
+
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+tokenizer.pad_token = tokenizer.eos_token
+
+# ======================================================
+# LOAD BASE MODEL (4-bit)
+# ======================================================
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True
+)
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    quantization_config=bnb_config,
+    device_map="auto"
+)
+
+# ======================================================
+# ATTACH LoRA
+# ======================================================
+
+model = PeftModel.from_pretrained(base_model, LORA_PATH)
+model.eval()
+
+# ======================================================
+# REQUEST SCHEMA
+# ======================================================
+
+class SupportingReasonInput(BaseModel):
+    evidenceCount: int
+
+class RecommendationInput(BaseModel):
+    supportingReasons: List[SupportingReasonInput]
+
+class GenerateRequest(BaseModel):
+    context: dict
+    recommendations: List[RecommendationInput]
+
+# ======================================================
+# SAFE GENERATION
+# ======================================================
+
+def generate(prompt: str) -> str:
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=MAX_NEW_TOKENS,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            do_sample=True,
+            repetition_penalty=1.2,
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    text = tokenizer.decode(output[0], skip_special_tokens=True)
+    return text.replace(prompt, "").strip()
+
+# ======================================================
+# PROMPT BUILDERS (STRICT)
+# ======================================================
+
+def recommendation_prompt(context: dict) -> str:
+    return f"""
+Write ONE professional technical recommendation.
+
+Rules:
+- ONE sentence
+- No labels
+- No reports
+- No metadata
+- No repetition
+
+Context:
+Heading: {context.get("Heading", "")}
+Customer Need: {context.get("CustomerNeed", "")}
+Service Summary: {context.get("ServiceSummaryContent", "")}
+
+Answer:
+""".strip()
+
+
+def result_prompt(recommendation: str) -> str:
+    return f"""
+Write ONE concise technical result of implementing the recommendation.
+
+Rules:
+- ONE sentence
+- Outcome focused
+- No labels
+- No explanation
+
+Recommendation:
+{recommendation}
+
+Answer:
+""".strip()
+
+
+def supporting_reason_prompt(context: dict, recommendation: str, used: list) -> str:
+    return f"""
+Write ONE technical supporting reason explaining WHY the recommendation is needed.
+
+Rules:
+- ONE sentence
+- Must be DIFFERENT from previous reasons
+- New technical angle
+- No labels
+- No repetition
+
+Previous Supporting Reasons:
+{used}
+
+Recommendation:
+{recommendation}
+
+Context:
+{context.get("ServiceSummaryContent", "")}
+
+Answer:
+""".strip()
+
+
+def evidence_prompt(context: dict, reason: str, used: list) -> str:
+    return f"""
+Write 2–3 factual technical sentences as evidence.
+
+Rules:
+- No repetition
+- No labels
+- No conclusions
+- No copied content
+
+Previous Evidence:
+{used}
+
+Supporting Reason:
+{reason}
+
+Context:
+{context.get("ServiceSummaryContent", "")}
+
+Answer:
+""".strip()
+
+# ======================================================
+# API ENDPOINT
+# ======================================================
+
+@app.post("/generate")
+def generate_document(req: GenerateRequest):
+
+    solutions = []
+
+    for rec in req.recommendations:
+
+        # -----------------------------
+        # Recommendation
+        # -----------------------------
+        recommendation = generate(
+            recommendation_prompt(req.context)
+        )
+
+        # -----------------------------
+        # Result
+        # -----------------------------
+        result = generate(
+            result_prompt(recommendation)
+        )
+
+        used_reasons = []
+        supporting_reasons_output = []
+
+        # -----------------------------
+        # Supporting Reasons
+        # -----------------------------
+        for sr in rec.supportingReasons:
+
+            sr_text = generate(
+                supporting_reason_prompt(
+                    req.context,
+                    recommendation,
+                    used_reasons
+                )
+            )
+            used_reasons.append(sr_text)
+
+            used_evidence = []
+            evidence_list = []
+
+            for _ in range(sr.evidenceCount):
+                ev_text = generate(
+                    evidence_prompt(
+                        req.context,
+                        sr_text,
+                        used_evidence
+                    )
+                )
+                used_evidence.append(ev_text)
+
+                evidence_list.append({
+                    "EvidenceTitle": "",
+                    "EvidenceContent": ev_text
+                })
+
+            supporting_reasons_output.append({
+                "SupportingReason": sr_text,
+                "Evidence": evidence_list
+            })
+
+        solutions.append({
+            "Recommendation": recommendation,
+            "Result": result,
+            "SupportingReasons": supporting_reasons_output
+        })
+
+    return {"Solutions": solutions}
+
+
+
+

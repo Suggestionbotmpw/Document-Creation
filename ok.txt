@@ -1,0 +1,93 @@
+{
+  "Solutions": [
+    {
+      "Recommendation": "Implement Contamination Control Program",
+      "Result": "Reduce equipment downtime by 10%",
+      "SupportingReasons": [
+        {
+          "SupportingReason": "The presence of water, dirt, metal particles, and other contaminants can lead to premature failure of lubricant systems and turbine components.",
+          "Evidence": [
+            {
+              "EvidenceTitle": "",      
+              "EvidenceContent": "The presence of water, dirt, metal particles, and other contaminants can lead to premature failure of lubricant systems and components. These contaminants may enter through air intake, system leaks, or external exposure, negatively impacting lubricant performance and component life."
+            },
+            {
+              "EvidenceTitle": "",
+              "EvidenceContent": "A contamination control program includes regular filtration of lubrication systems, cleanliness monitoring through oil analysis, and controlled handling practices to remove and prevent contaminant ingress, thereby extending lubricant life and reducing unplanned downtime."
+            }
+          ]
+        },
+        {
+          "SupportingReason": "Regular maintenance and structured problem-solving practices support early identification and mitigation of contamination-related risks in turbine lubrication systems.",
+          "Evidence": [
+            {
+              "EvidenceTitle": "",
+              "EvidenceContent": "Mobil Advanced Problem Solving Training was completed to help site personnel analyze oil analysis findings, identify contamination sources, and apply corrective actions to maintain turbine gearbox and bearing reliability."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+
+
+
+
+
+
+
+"recommendations": [
+    {
+      "id": "rec-1",
+      "generate": true,
+      "supportingReasons": [
+        {
+          "id": "rec-1-sr-1",
+          "generate": true,
+           "Evidence": [
+            {
+              "EvidenceTitle": "",      
+              "EvidenceContent": ""
+            },
+            {
+              "EvidenceTitle": "",
+              "EvidenceContent": ""
+            }
+          ]
+        },
+        {
+          "id": "rec-1-sr-2",
+          "generate": true,
+          "Evidence": [
+            {
+              "EvidenceTitle": "",      
+              "EvidenceContent": ""
+            },
+            {
+              "EvidenceTitle": "",
+              "EvidenceContent": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rec-2",
+      "generate": true,
+      "supportingReasons": [
+        {
+          "id": "rec-2-sr-1",
+          "generate": true,
+          "Evidence": [
+            {
+              "EvidenceTitle": "",      
+              "EvidenceContent": ""
+            },
+          ]
+        }
+      ]
+    }
+  ]
+}
